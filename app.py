@@ -89,7 +89,7 @@ if archivo_bc3 is not None:
     datos_extraidos = []
     
     # Buscamos la raíz del proyecto (El código que es padre pero no es hijo de nadie)
-    todos_los_hijos = set([h para lista in jerarquia.values() for h in lista])
+    todos_los_hijos = set([h for lista in jerarquia.values() for h in lista])
     raices = [p for p in jerarquia.keys() if p not in todos_los_hijos]
     
     if raices:
