@@ -7,7 +7,6 @@ st.set_page_config(page_title="Conversor BC3 a Excel", page_icon="🏗️", layo
 st.title("🏗️ Conversor Nativo de BC3 a Excel")
 archivo_bc3 = st.file_uploader("Sube aquí tu archivo .bc3", type=["bc3"])
 
-# --- Función auxiliar para limpiar números del BC3 ---
 def parsear_numero(valor):
     try:
         return float(valor.strip().replace(',', '.'))
@@ -20,21 +19,18 @@ if archivo_bc3 is not None:
     except:
         contenido = archivo_bc3.read().decode('utf-8')
     
-    # 1. DICCIONARIOS PARA ALMACENAR DATOS TEMPORALMENTE
     conceptos = {}
     jerarquia = {}
-    mediciones = {}
-
+    
     lineas = contenido.splitlines()
     
-    # 2. PARSEO DEL ARCHIVO LÍNEA A LÍNEA
     for linea in lineas:
-        
-        # A. Extraer Conceptos (Textos, Unidades, Precios)
+        # 1. Leer Conceptos (~C)
         if linea.startswith('~C|'):
             partes = linea.split('|')
             if len(partes) >= 5:
-                codigo = partes[1].strip()
+                # Limpiamos el código de almohadillas '#' para unificar jerarquías
+                codigo = partes[1].strip().replace('#', '')
                 precio_str = partes[4].strip().replace('\\', '')
                 conceptos[codigo] = {
                     "Ud": partes[2].strip(),
@@ -42,87 +38,86 @@ if archivo_bc3 is not None:
                     "Precio": parsear_numero(precio_str)
                 }
                 
-        # B. Extraer Jerarquía / Descomposición (Padres e Hijos)
+        # 2. Leer Textos Largos (~T)
+        elif linea.startswith('~T|'):
+            partes = linea.split('|')
+            if len(partes) >= 3:
+                codigo = partes[1].strip().replace('#', '')
+                texto = partes[2].strip()
+                if codigo in conceptos:
+                    # Sobrescribimos la descripción corta con la larga si existe
+                    conceptos[codigo]["Descripción"] = texto
+
+        # 3. Leer Descomposición / Jerarquía (~D)
         elif linea.startswith('~D|'):
             partes = linea.split('|')
             if len(partes) >= 3:
-                padre = partes[1].strip()
+                padre = partes[1].strip().replace('#', '')
                 hijos = []
-                # Los hijos vienen separados por '|', y sus detalles por '\'
-                for hijo_str in partes[2:]:
-                    if hijo_str:
-                        datos_hijo = hijo_str.split('\\')
-                        if len(datos_hijo) >= 1:
-                            hijos.append(datos_hijo[0].strip()) # Guardamos solo el código del hijo
+                # Los hijos vienen separados por '\'
+                # Formato FIEBDC: Hijo1 \ Factor1 \ Rendimiento1 \ Hijo2 \ ...
+                datos_hijos = "|".join(partes[2:]).split('\\')
+                
+                # Iteramos de 3 en 3 leyendo: código del hijo, factor, cantidad(rendimiento)
+                for i in range(0, len(datos_hijos) - 2, 3):
+                    hijo_cod = datos_hijos[i].strip().replace('#', '')
+                    if hijo_cod:
+                        cantidad = parsear_numero(datos_hijos[i+2])
+                        hijos.append((hijo_cod, cantidad))
+                        
                 jerarquia[padre] = hijos
-                
-        # C. Extraer Mediciones (Cantidades)
-        elif linea.startswith('~M|'):
-            partes = linea.split('|')
-            if len(partes) >= 3:
-                codigo = partes[1].strip()
-                # Las líneas de medición están a partir del índice 3 normalmente
-                lineas_med = partes[3:] if len(partes) > 3 else []
-                total_partida = 0.0
-                
-                for m in lineas_med:
-                    if m:
-                        # Formato: Comentario \ Uds \ Largo \ Ancho \ Alto
-                        datos_m = m.split('\\')
-                        factores = []
-                        
-                        # Multiplicamos las dimensiones (índices 1 al 4) si existen
-                        for i in range(1, 5):
-                            if len(datos_m) > i and datos_m[i].strip():
-                                factores.append(parsear_numero(datos_m[i]))
-                        
-                        # Si hay números, calculamos el subtotal de la línea
-                        if factores:
-                            subtotal = 1.0
-                            for f in factores:
-                                subtotal *= f
-                            total_partida += subtotal
 
-                mediciones[codigo] = total_partida
-
-    # 3. RECONSTRUCCIÓN DEL PRESUPUESTO
+    # 4. RECONSTRUCCIÓN DEL ÁRBOL (Soporta niveles infinitos)
     datos_extraidos = []
     
-    # Buscamos la raíz del proyecto (El código que es padre pero no es hijo de nadie)
-    todos_los_hijos = set([h for lista in jerarquia.values() for h in lista])
+    # Encontramos la raíz principal (el nodo que tiene hijos pero no es hijo de nadie)
+    todos_los_hijos = set([h[0] for lista in jerarquia.values() for h in lista])
     raices = [p for p in jerarquia.keys() if p not in todos_los_hijos]
     
     if raices:
         raiz_principal = raices[0]
-        capitulos = jerarquia.get(raiz_principal, [])
         
-        # Recorremos cada Capítulo
-        for cod_cap in capitulos:
-            nombre_capitulo = conceptos.get(cod_cap, {}).get("Descripción", cod_cap)
-            partidas = jerarquia.get(cod_cap, [])
+        # Función recursiva para navegar por la estructura
+        def recorrer_arbol(nodo, ruta_capitulo="", cantidad_acumulada=1.0):
+            hijos = jerarquia.get(nodo, [])
             
-            # Recorremos cada Partida dentro del Capítulo
-            for cod_partida in partidas:
-                concepto = conceptos.get(cod_partida, {})
-                cantidad = mediciones.get(cod_partida, 0.0)
+            if hijos:
+                # Es un agrupador (Proyecto, Capítulo o Subcapítulo)
+                nombre_nodo = conceptos.get(nodo, {}).get("Descripción", nodo)
+                
+                if nodo == raiz_principal:
+                    nueva_ruta = ""
+                else:
+                    nueva_ruta = f"{ruta_capitulo} > {nombre_nodo}" if ruta_capitulo else nombre_nodo
+                    
+                # Llamada recursiva hacia adentro del árbol
+                for hijo_cod, cantidad_hijo in hijos:
+                    recorrer_arbol(hijo_cod, nueva_ruta, cantidad_acumulada * cantidad_hijo)
+            else:
+                # Es una Partida u hoja final
+                concepto = conceptos.get(nodo, {})
                 precio = concepto.get("Precio", 0.0)
                 
                 datos_extraidos.append({
-                    "Capítulo": nombre_capitulo,
-                    "Código": cod_partida,
+                    "Capítulo": ruta_capitulo,
+                    "Código": nodo,
                     "Ud": concepto.get("Ud", ""),
                     "Descripción": concepto.get("Descripción", ""),
                     "Precio (€)": precio,
-                    "Cantidad": round(cantidad, 3),
-                    "Importe (€)": round(cantidad * precio, 2)
+                    "Cantidad": round(cantidad_acumulada, 3),
+                    "Importe (€)": round(cantidad_acumulada * precio, 2)
                 })
+        
+        # Arrancamos la lectura desde la raíz
+        recorrer_arbol(raiz_principal)
 
-    # 4. RENDERIZADO EN STREAMLIT Y EXCEL
     if datos_extraidos:
         df_bc3 = pd.DataFrame(datos_extraidos)
         
-        # Mostramos KPIs rápidos en Streamlit
-        st.subheader(f"Total Presupuesto: {df_bc3['Importe (€)'].sum():,.2f} €")
+        # Mostrar KPIs rápidos
+        total_presupuesto = df_bc3['Importe (€)'].sum()
+        st.subheader(f"Total Presupuesto: {total_presupuesto:,.2f} €")
+        
         st.dataframe(df_bc3, use_container_width=True)
         
         buffer_excel = io.BytesIO()
@@ -130,10 +125,10 @@ if archivo_bc3 is not None:
             df_bc3.to_excel(writer, index=False, sheet_name="Presupuesto")
         
         st.download_button(
-            label="⬇️ Descargar Excel Estructurado", 
+            label="⬇️ Descargar Excel Completo", 
             data=buffer_excel.getvalue(), 
-            file_name="Presupuesto_Estructurado.xlsx", 
+            file_name="Presupuesto_Parseado.xlsx", 
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
-        st.warning("⚠️ No se han encontrado partidas. Revisa el formato de tu BC3.")
+        st.warning("⚠️ No se ha podido extraer el árbol de partidas. Revisa que sea un BC3 válido.")
